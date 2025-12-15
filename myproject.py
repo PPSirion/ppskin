@@ -12,12 +12,16 @@ window_size = (800, 600)
 plane_height = np.zeros((plane_size, plane_size))
 plane_velocity = np.zeros((plane_size, plane_size))
 plane_acceleration = np.zeros((plane_size, plane_size))
+# add mass per-element (default 1.0)
+plane_mass = np.ones((plane_size, plane_size))
 
 # Parametri di simulazione
 elasticity = 0.3 # Coefficiente di elasticità
 damping = 0.7    # Coefficiente di smorzamento
 delta_time = 1.0  # Passo di tempo per la simulazione
 force = 3.0      # Forza applicata al clic del mouse
+# base mass used by UI to initialize/reset masses
+base_mass = 1.0
 
 # Controlli della telecamera
 class Camera:
@@ -87,7 +91,9 @@ def update_plane():
     laplacian = np.zeros((plane_size, plane_size))
     laplacian[1:-1, 1:-1] = (plane_height[:-2, 1:-1] + plane_height[2:, 1:-1] +
                               plane_height[1:-1, :-2] + plane_height[1:-1, 2:] - 4 * plane_height[1:-1, 1:-1])
-    plane_acceleration = elasticity * laplacian - damping * plane_velocity
+    # acceleration proportional to forces divided by mass
+    safe_mass = np.maximum(plane_mass, 1e-6)
+    plane_acceleration = (elasticity * laplacian - damping * plane_velocity) / safe_mass
     plane_velocity += plane_acceleration * delta_time
     plane_height += plane_velocity * delta_time
 
@@ -97,6 +103,10 @@ def reset_simulation():
     plane_height.fill(0)
     plane_velocity.fill(0)
     plane_acceleration.fill(0)
+
+def reset_masses():
+    global plane_mass, base_mass
+    plane_mass.fill(base_mass)
 
 # Replace old mouse callbacks and force application to restrict to the force box
 def mouse_button_callback(window, button, action, mods):
@@ -140,7 +150,9 @@ def apply_force_at_cursor(window, from_box=False, local=None):
         for dy in range(-1, 2):
             gx, gy = grid_x + dx, grid_y + dy
             if 0 <= gx < plane_size and 0 <= gy < plane_size:
-                plane_height[gx, gy] -= force
+                # apply impulse to velocity using force = m * dv -> dv = force / m
+                m = max(1e-6, plane_mass[gx, gy])
+                plane_velocity[gx, gy] -= force / m
 
 def setup_lighting_and_color():
     glEnable(GL_LIGHTING)
@@ -162,6 +174,14 @@ def get_color(z):
     v = 1.0
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return (r, g, b)
+
+# helper to convert float RGBA to ImGui U32 color
+def color_to_u32(r, g, b, a=1.0):
+    r_i = int(max(0, min(255, int(r * 255))))
+    g_i = int(max(0, min(255, int(g * 255))))
+    b_i = int(max(0, min(255, int(b * 255))))
+    a_i = int(max(0, min(255, int(a * 255))))
+    return (a_i << 24) | (b_i << 16) | (g_i << 8) | r_i
 
 def draw_plane():
     glBegin(GL_POINTS)
@@ -209,7 +229,7 @@ def main():
     fullscreen_size = (mode.size.width, mode.size.height)
 
     # Imposta la finestra come non decorata (senza bordi)
-    window = glfw.create_window(fullscreen_size[0], fullscreen_size[1], "Griglia 3D Fisica", None, None)
+    window = glfw.create_window(fullscreen_size[0], fullscreen_size[1], "3D Simulation", None, None)
     if not window:
         glfw.terminate()
         return
@@ -233,15 +253,16 @@ def main():
 
         # Finestra ImGui per i parametri
         imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(280, 150)
+        imgui.set_next_window_size(280, 180)
         flags = imgui.WINDOW_NO_COLLAPSE
         imgui.begin("Parameters", True, flags)
         _, elasticity = imgui.slider_float("k", elasticity, 0.1, 1.0)
         _, damping = imgui.slider_float("c", damping, 0.01, 1.0)
         _, delta_time = imgui.slider_float("dt", delta_time, 0.01, 2.0)
-        _, force = imgui.slider_float("F", force, 0.1, 5.0)
-        # Reset button
-        if imgui.button("Reset"):
+        _, force = imgui.slider_float("F", force, 0.1, 10.0)
+        global base_mass
+        _, base_mass = imgui.slider_float("m", base_mass, 0.1, 10.0)
+        if imgui.button("Reset Simulation"):
             reset_simulation()
         imgui.end()
 
@@ -266,14 +287,44 @@ def main():
         draw_plane()
         draw_empty_hexagons()
 
-        # Draw the force box as a simple colored rectangle in the ImGui window
+        # Draw the force box as a miniature grid mapping one-to-one with the simulation plane
         bx, by, bw, bh = get_force_box_rect()
         imgui.set_next_window_position(bx, by)
         imgui.set_next_window_size(bw, bh)
-        flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE
+        flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_SCROLLBAR
         imgui.begin("Force Box", False, flags)
+        # remove internal window padding so content fits exactly
+        imgui.push_style_var(imgui.STYLE_WINDOW_PADDING, (0, 0))
+        padding = 2
+        # use available content region to size the grid so no scrolling is needed
+        avail_w, avail_h = imgui.get_content_region_available()
+        child_w = max(0, avail_w - padding * 2)
+        child_h = max(0, avail_h - padding * 2)
+        child_flags = imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_SCROLL_WITH_MOUSE
+        imgui.begin_child("force_grid_child", child_w, child_h, border=False, flags=child_flags)
+        # draw miniature grid using screen-space origin from cursor
+        draw_list = imgui.get_window_draw_list()
+        origin_x, origin_y = imgui.get_cursor_screen_pos()
+        # small inner offset
+        child_x = origin_x + padding
+        child_y = origin_y + padding
+        cell_w = float(child_w) / float(plane_size)
+        cell_h = float(child_h) / float(plane_size)
+        for ix in range(plane_size):
+            for iy in range(plane_size):
+                x0 = child_x + ix * cell_w
+                y0 = child_y + (plane_size - 1 - iy) * cell_h
+                x1 = x0 + cell_w
+                y1 = y0 + cell_h
+                z = plane_height[ix, iy]
+                r, g, b = get_color(z)
+                col = color_to_u32(r, g, b, 1.0)
+                draw_list.add_rect_filled(x0, y0, x1, y1, col)
+                border_col = color_to_u32(0.0, 0.0, 0.0, 0.15)
+                draw_list.add_rect(x0, y0, x1, y1, border_col)
+        imgui.end_child()
+        imgui.pop_style_var()
         imgui.end()
-
         imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
