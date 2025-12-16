@@ -12,14 +12,13 @@ window_size = (800, 600)
 plane_height = np.zeros((plane_size, plane_size))
 plane_velocity = np.zeros((plane_size, plane_size))
 plane_acceleration = np.zeros((plane_size, plane_size))
-# add mass per-element (default 1.0)
 plane_mass = np.ones((plane_size, plane_size))
 
 # Parametri di simulazione
-elasticity = 0.3 # Coefficiente di elasticità
-damping = 0.7    # Coefficiente di smorzamento
+elasticity = 1.0  # Aumentato da 0.3 a 0.5 per maggiore propagazione
+damping = 0.3     # Leggermente ridotto per meno smorzamento
 delta_time = 1.0  # Passo di tempo per la simulazione
-force = 3.0      # Forza applicata al clic del mouse
+force = 4.0       # Forza applicata al clic del mouse (aumentata da 3.0)
 # base mass used by UI to initialize/reset masses
 base_mass = 1.0
 
@@ -47,16 +46,26 @@ camera = Camera()
 mouse_dragging = False
 mouse_weight_active = False
 
-# Small force box area for applying force instead of whole window
-force_box_size = (220, 220)  # width, height in pixels
+# Aumentato il size della mini griglia
+force_box_size = (350, 350)  # Aumentato da 220 a 350 (larghezza, altezza in pixel)
 force_box_margin = 10
+
+# Variabili per la mappatura del riquadro piccolo
+force_box_params = {
+    'child_x': 0,
+    'child_y': 0,
+    'cell_w': 0,
+    'cell_h': 0,
+    'start_y': 0,
+    'padding': 0
+}
 
 def get_force_box_rect():
     # position the box at bottom-right with a small margin
     bw, bh = force_box_size
     bx = window_size[0] - bw - force_box_margin
     # move the box further up from the bottom
-    force_box_vertical_offset = 150
+    force_box_vertical_offset = 100  # Ridotto da 150 a 100 per posizionare meglio la griglia più grande
     by = window_size[1] - bh - force_box_margin - force_box_vertical_offset
     if bx < 0:
         bx = 0
@@ -64,60 +73,88 @@ def get_force_box_rect():
         by = 0
     return bx, by, bw, bh
 
-def cursor_in_force_box(window):
-    """Return (inside, local_x, local_y) where local coords are in [0,1]."""
-    try:
-        cx, cy = glfw.get_cursor_pos(window)
-    except Exception:
-        return False, None, None
-    bx, by, bw, bh = get_force_box_rect()
-    # glfw cursor pos origin is top-left of window
-    if bx <= cx <= bx + bw and by <= cy <= by + bh:
-        local_x = (cx - bx) / bw
-        local_y = (cy - by) / bh
-        return True, local_x, local_y
-    return False, None, None
-
-# Restore hex offset helper used for drawing the staggered hex grid
 def get_hex_offset(x):
     """Restituisce l'offset per la griglia esagonale."""
     return (x % 2) * 0.5
+
+def compute_hexagonal_laplacian(height_grid):
+    """Calcola il laplaciano per una griglia esagonale considerando i 6 vicini."""
+    laplacian = np.zeros((plane_size, plane_size))
+    
+    for x in range(plane_size):
+        for y in range(plane_size):
+            neighbor_sum = 0.0
+            neighbor_count = 0
+            
+            # Definisci i 6 vicini esagonali in base alla riga (pari o dispari)
+            if x % 2 == 0:  # Riga pari
+                neighbors = [
+                    (x-1, y),   # Sinistra
+                    (x+1, y),   # Destra
+                    (x, y-1),   # Basso
+                    (x, y+1),   # Alto
+                    (x-1, y+1), # Alto-sinistra
+                    (x+1, y+1)  # Alto-destra
+                ]
+            else:  # Riga dispari
+                neighbors = [
+                    (x-1, y),   # Sinistra
+                    (x+1, y),   # Destra
+                    (x, y-1),   # Basso
+                    (x, y+1),   # Alto
+                    (x-1, y-1), # Basso-sinistra
+                    (x+1, y-1)  # Basso-destra
+                ]
+            
+            # Somma i vicini validi
+            for nx, ny in neighbors:
+                if 0 <= nx < plane_size and 0 <= ny < plane_size:
+                    neighbor_sum += height_grid[nx, ny]
+                    neighbor_count += 1
+            
+            # Calcola il laplaciano: media dei vicini meno il centro
+            if neighbor_count > 0:
+                laplacian[x, y] = (neighbor_sum / neighbor_count) - height_grid[x, y]
+    
+    return laplacian
 
 def update_plane():
     global plane_height, plane_velocity, plane_acceleration
     # Applica il peso se il mouse è premuto
     if mouse_weight_active:
         apply_force_at_cursor(glfw.get_current_context())
-    laplacian = np.zeros((plane_size, plane_size))
-    laplacian[1:-1, 1:-1] = (plane_height[:-2, 1:-1] + plane_height[2:, 1:-1] +
-                              plane_height[1:-1, :-2] + plane_height[1:-1, 2:] - 4 * plane_height[1:-1, 1:-1])
+    
+    # Usa il laplaciano esagonale invece del laplaciano a 4 vicini
+    laplacian = compute_hexagonal_laplacian(plane_height)
+    
     # acceleration proportional to forces divided by mass
     safe_mass = np.maximum(plane_mass, 1e-6)
-    plane_acceleration = (elasticity * laplacian - damping * plane_velocity) / safe_mass
+    
+    # Aumentato il coefficiente di elasticità per maggiore propagazione
+    effective_elasticity = elasticity * 1.5  # Moltiplicatore per aumentare la propagazione
+    
+    plane_acceleration = (effective_elasticity * laplacian - damping * plane_velocity) / safe_mass
     plane_velocity += plane_acceleration * delta_time
     plane_height += plane_velocity * delta_time
 
-# Add reset function for the simulation
 def reset_simulation():
     global plane_height, plane_velocity, plane_acceleration
     plane_height.fill(0)
     plane_velocity.fill(0)
     plane_acceleration.fill(0)
 
-def reset_masses():
-    global plane_mass, base_mass
-    plane_mass.fill(base_mass)
-
-# Replace old mouse callbacks and force application to restrict to the force box
 def mouse_button_callback(window, button, action, mods):
     global mouse_dragging, mouse_weight_active
     if button == glfw.MOUSE_BUTTON_LEFT:
         if action == glfw.PRESS:
-            inside, lx, ly = cursor_in_force_box(window)
-            if inside:
+            # Ottieni coordinate del mouse
+            cx, cy = glfw.get_cursor_pos(window)
+            # Converti in coordinate della griglia esagonale
+            grid_x, grid_y = force_box_mouse_to_grid(cx, cy)
+            if grid_x is not None and grid_y is not None:
                 mouse_dragging = True
                 mouse_weight_active = True
-                apply_force_at_cursor(window, from_box=True, local=(lx, ly))
+                apply_force_at_cursor(window, from_grid=True, grid_pos=(grid_x, grid_y))
             else:
                 mouse_dragging = False
                 mouse_weight_active = False
@@ -125,34 +162,83 @@ def mouse_button_callback(window, button, action, mods):
             mouse_dragging = False
             mouse_weight_active = False
 
-
 def cursor_position_callback(window, xpos, ypos):
     global mouse_dragging
     if mouse_dragging and mouse_weight_active:
-        apply_force_at_cursor(window)
+        # Ottieni coordinate del mouse e converti
+        grid_x, grid_y = force_box_mouse_to_grid(xpos, ypos)
+        if grid_x is not None and grid_y is not None:
+            apply_force_at_cursor(window, from_grid=True, grid_pos=(grid_x, grid_y))
 
-
-def apply_force_at_cursor(window, from_box=False, local=None):
-    """Apply force only if cursor is inside the defined force box.
-    If from_box and local provided, local should be (lx, ly) in [0,1].
-    """
-    global plane_height
-    if from_box and local is not None:
-        lx, ly = local
+def apply_force_at_cursor(window, from_grid=False, grid_pos=None):
+    """Apply force ONLY to the single clicked hex element (not neighbors)."""
+    global plane_velocity
+    if from_grid and grid_pos is not None:
+        grid_x, grid_y = grid_pos
     else:
-        inside, lx, ly = cursor_in_force_box(window)
-        if not inside:
+        # Fallback: usa il vecchio metodo se necessario
+        cx, cy = glfw.get_cursor_pos(window)
+        grid_x, grid_y = force_box_mouse_to_grid(cx, cy)
+        if grid_x is None or grid_y is None:
             return
-    # Map local coords inside the box to grid coordinates
-    grid_x = int(plane_size * (lx))
-    grid_y = int(plane_size * (1 - ly))
-    for dx in range(-1, 2):
-        for dy in range(-1, 2):
-            gx, gy = grid_x + dx, grid_y + dy
-            if 0 <= gx < plane_size and 0 <= gy < plane_size:
-                # apply impulse to velocity using force = m * dv -> dv = force / m
-                m = max(1e-6, plane_mass[gx, gy])
-                plane_velocity[gx, gy] -= force / m
+    
+    # Apply force ONLY to the clicked cell (not neighbors)
+    if 0 <= grid_x < plane_size and 0 <= grid_y < plane_size:
+        m = max(1e-6, plane_mass[grid_x, grid_y])
+        # Aumentata l'intensità della forza applicata
+        plane_velocity[grid_x, grid_y] -= (force * 1.2) / m
+
+def force_box_mouse_to_grid(mx, my):
+    """Convert mouse coordinates (relative to window) to grid coordinates (ix, iy) in the force box.
+    Returns (ix, iy) or (None, None) if outside any cell."""
+    global force_box_params
+    
+    # Estrai parametri
+    child_x = force_box_params['child_x']
+    child_y = force_box_params['child_y']
+    cell_w = force_box_params['cell_w']
+    cell_h = force_box_params['cell_h']
+    start_y = force_box_params['start_y']
+    padding = force_box_params['padding']
+    
+    # Verifica se (mx, my) è dentro l'area del child (con padding)
+    if not (child_x <= mx < child_x + plane_size * cell_w + padding and
+            child_y <= my < child_y + (plane_size + 0.5) * cell_h + padding):
+        return None, None
+    
+    # Converti in coordinate relative all'area di disegno (senza padding)
+    rel_x = mx - child_x
+    rel_y = my - child_y
+    
+    # Calcola l'indice di colonna ix
+    ix = int(rel_x / cell_w)
+    if ix < 0 or ix >= plane_size:
+        return None, None
+    
+    # Calcola l'offset verticale per questa colonna (0 o 0.5 in unità cella)
+    offset = get_hex_offset(ix) * 0.5
+    
+    # Calcola l'indice di riga iy
+    # Prima converti in coordinate "griglia" normalizzate
+    grid_y = (rel_y - offset * cell_h) / cell_h
+    
+    # La griglia è invertita verticalmente nel display
+    iy = int(grid_y)
+    
+    # Verifica che sia dentro i limiti
+    if iy < 0 or iy >= plane_size:
+        return None, None
+    
+    # Verifica finale che il punto sia dentro l'esagono (approssimato come rettangolo)
+    # Per semplicità, controlliamo solo i bordi del rettangolo
+    cell_x0 = ix * cell_w
+    cell_y0 = iy * cell_h + offset * cell_h
+    
+    if (cell_x0 <= rel_x < cell_x0 + cell_w and 
+        cell_y0 <= rel_y < cell_y0 + cell_h):
+        return ix, plane_size - 1 - iy  # Inverti verticalmente per matchare la griglia 3D
+    
+    return None, None
 
 def setup_lighting_and_color():
     glEnable(GL_LIGHTING)
@@ -175,7 +261,6 @@ def get_color(z):
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return (r, g, b)
 
-# helper to convert float RGBA to ImGui U32 color
 def color_to_u32(r, g, b, a=1.0):
     r_i = int(max(0, min(255, int(r * 255))))
     g_i = int(max(0, min(255, int(g * 255))))
@@ -193,21 +278,26 @@ def draw_plane():
     glEnd()
 
 def draw_empty_hexagons():
+    """Disegna il wireframe esagonale che mostra le 6 connessioni."""
     glBegin(GL_LINES)
     for x in range(plane_size):
         for y in range(plane_size):
             z = plane_height[x, y]
             glColor3f(*get_color(z))
+            
+            # Definisci i 6 vertici dell'esagono
+            vertices = []
             for i in range(6):
                 angle = i * np.pi / 3
-                x_offset = np.cos(angle)
-                y_offset = np.sin(angle)
-                x1 = x + 0.5 * x_offset
-                y1 = y + 0.5 * y_offset + get_hex_offset(x)
-                z1 = z
-                x2 = x + 0.5 * np.cos(angle + np.pi / 3)
-                y2 = y + 0.5 * np.sin(angle + np.pi / 3) + get_hex_offset(x)
-                z2 = z
+                vx = x + 0.5 * np.cos(angle)
+                vy = y + 0.5 * np.sin(angle) + get_hex_offset(x)
+                vz = z
+                vertices.append((vx, vy, vz))
+            
+            # Disegna linee che connettono vertici consecutivi
+            for i in range(6):
+                x1, y1, z1 = vertices[i]
+                x2, y2, z2 = vertices[(i + 1) % 6]
                 glVertex3f(x1, y1, z1)
                 glVertex3f(x2, y2, z2)
     glEnd()
@@ -218,7 +308,7 @@ def cleanup():
     glDisable(GL_DEPTH_TEST)
 
 def main():
-    global elasticity, damping, delta_time, force
+    global elasticity, damping, delta_time, force, window_size
 
     if not glfw.init():
         return
@@ -235,7 +325,6 @@ def main():
         return
 
     # Aggiorna window_size per la simulazione e la conversione coordinate mouse
-    global window_size
     window_size = fullscreen_size
 
     glfw.make_context_current(window)
@@ -253,13 +342,14 @@ def main():
 
         # Finestra ImGui per i parametri
         imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(280, 180)
+        imgui.set_next_window_size(280, 200)  # Aumentata altezza per aggiungere informazioni
         flags = imgui.WINDOW_NO_COLLAPSE
         imgui.begin("Parameters", True, flags)
-        _, elasticity = imgui.slider_float("k", elasticity, 0.1, 1.0)
+        imgui.text("Propagation Settings:")
+        _, elasticity = imgui.slider_float("k", elasticity, 0.1, 2.0)  # Aumentato range massimo a 2.0
         _, damping = imgui.slider_float("c", damping, 0.01, 1.0)
         _, delta_time = imgui.slider_float("dt", delta_time, 0.01, 2.0)
-        _, force = imgui.slider_float("F", force, 0.1, 10.0)
+        _, force = imgui.slider_float("F", force, 0.1, 15.0)  # Aumentato range massimo a 15.0
         global base_mass
         _, base_mass = imgui.slider_float("m", base_mass, 0.1, 10.0)
         if imgui.button("Reset Simulation"):
@@ -287,44 +377,77 @@ def main():
         draw_plane()
         draw_empty_hexagons()
 
-        # Draw the force box as a miniature grid mapping one-to-one with the simulation plane
+        # Draw the force box as a miniature grid with hexagonal layout
         bx, by, bw, bh = get_force_box_rect()
         imgui.set_next_window_position(bx, by)
         imgui.set_next_window_size(bw, bh)
         flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_SCROLLBAR
         imgui.begin("Force Box", False, flags)
+        
         # remove internal window padding so content fits exactly
         imgui.push_style_var(imgui.STYLE_WINDOW_PADDING, (0, 0))
-        padding = 2
+        padding = 4  # Aumentato il padding per rendere le celle più visibili
+        
         # use available content region to size the grid so no scrolling is needed
         avail_w, avail_h = imgui.get_content_region_available()
         child_w = max(0, avail_w - padding * 2)
         child_h = max(0, avail_h - padding * 2)
+        
         child_flags = imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_SCROLL_WITH_MOUSE
         imgui.begin_child("force_grid_child", child_w, child_h, border=False, flags=child_flags)
+        
         # draw miniature grid using screen-space origin from cursor
         draw_list = imgui.get_window_draw_list()
         origin_x, origin_y = imgui.get_cursor_screen_pos()
+        
         # small inner offset
         child_x = origin_x + padding
         child_y = origin_y + padding
-        cell_w = float(child_w) / float(plane_size)
-        cell_h = float(child_h) / float(plane_size)
+        
+        # Calcola la dimensione della cella per adattare la griglia esagonale
+        # L'altezza totale necessaria è (plane_size + 0.5) * cell_h a causa dell'offset
+        cell_size = min(child_w / plane_size, child_h / (plane_size + 0.5))
+        cell_w = cell_size
+        cell_h = cell_size
+        
+        # Calcola l'altezza totale della griglia con offset
+        total_grid_height = (plane_size + 0.5) * cell_h
+        start_y = child_y + (child_h - total_grid_height) / 2
+        
+        # Salva i parametri per la mappatura del mouse
+        force_box_params['child_x'] = child_x
+        force_box_params['child_y'] = child_y
+        force_box_params['cell_w'] = cell_w
+        force_box_params['cell_h'] = cell_h
+        force_box_params['start_y'] = start_y
+        force_box_params['padding'] = padding
+        
+        # Disegna la griglia esagonale
         for ix in range(plane_size):
             for iy in range(plane_size):
+                # Calcola la posizione con offset esagonale
                 x0 = child_x + ix * cell_w
-                y0 = child_y + (plane_size - 1 - iy) * cell_h
+                offset = get_hex_offset(ix) * 0.5  # 0 o 0.5
+                y0 = start_y + (plane_size - 1 - iy) * cell_h + offset * cell_h
                 x1 = x0 + cell_w
                 y1 = y0 + cell_h
+                
+                # Ottieni il colore in base all'altezza
                 z = plane_height[ix, iy]
                 r, g, b = get_color(z)
                 col = color_to_u32(r, g, b, 1.0)
+                
+                # Disegna il rettangolo (cella esagonale approssimata)
                 draw_list.add_rect_filled(x0, y0, x1, y1, col)
-                border_col = color_to_u32(0.0, 0.0, 0.0, 0.15)
+                
+                # Bordo sottile - aumentata l'opacità per visibilità
+                border_col = color_to_u32(0.0, 0.0, 0.0, 0.25)
                 draw_list.add_rect(x0, y0, x1, y1, border_col)
+        
         imgui.end_child()
         imgui.pop_style_var()
         imgui.end()
+        
         imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
