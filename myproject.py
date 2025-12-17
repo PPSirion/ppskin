@@ -19,7 +19,6 @@ elasticity = 1.0  # Aumentato da 0.3 a 0.5 per maggiore propagazione
 damping = 0.3     # Leggermente ridotto per meno smorzamento
 delta_time = 1.0
 force = 4.0       # Forza applicata al clic del mouse (aumentata da 3.0)
-# base mass used by UI to initialize/reset masses
 base_mass = 1.0
 # Limite sulla velocità per evitare esplosioni numeriche
 max_velocity = 5.0
