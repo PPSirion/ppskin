@@ -17,10 +17,12 @@ plane_mass = np.ones((plane_size, plane_size))
 # Parametri di simulazione
 elasticity = 1.0  # Aumentato da 0.3 a 0.5 per maggiore propagazione
 damping = 0.3     # Leggermente ridotto per meno smorzamento
-delta_time = 1.0  # Passo di tempo per la simulazione
+delta_time = 1.0
 force = 4.0       # Forza applicata al clic del mouse (aumentata da 3.0)
 # base mass used by UI to initialize/reset masses
 base_mass = 1.0
+# Limite sulla velocità per evitare esplosioni numeriche
+max_velocity = 5.0
 
 # Controlli della telecamera
 class Camera:
@@ -77,65 +79,99 @@ def get_hex_offset(x):
     """Restituisce l'offset per la griglia esagonale."""
     return (x % 2) * 0.5
 
-def compute_hexagonal_laplacian(height_grid):
-    """Calcola il laplaciano per una griglia esagonale considerando i 6 vicini."""
-    laplacian = np.zeros((plane_size, plane_size))
-    
+def compute_spring_forces(height_grid, velocity_grid):
+    """Calcola la forza netta (molla + smorzatore) su ogni cella dovuta ai 6 vicini esagonali.
+    Restituisce un array con la somma delle forze per cella (positivo = spinge verso su)."""
+    net_force = np.zeros((plane_size, plane_size))
+
+    # Usa i parametri globali: elasticity come costante della molla (k), damping come coefficiente del damper (c)
+    k = elasticity
+    c = damping
+
     for x in range(plane_size):
         for y in range(plane_size):
-            neighbor_sum = 0.0
+            # definisci i 6 vicini come prima (parita' della colonna)
+            if x % 2 == 0:  # riga/parita' pari
+                neighbors = [
+                    (x-1, y),   # sinistra
+                    (x+1, y),   # destra
+                    (x, y-1),   # basso
+                    (x, y+1),   # alto
+                    (x-1, y+1), # alto-sinistra
+                    (x+1, y+1)  # alto-destra
+                ]
+            else:  # riga dispari
+                neighbors = [
+                    (x-1, y),   # sinistra
+                    (x+1, y),   # destra
+                    (x, y-1),   # basso
+                    (x, y+1),   # alto
+                    (x-1, y-1), # basso-sinistra
+                    (x+1, y-1)  # basso-destra
+                ]
+
+            hz = height_grid[x, y]
+            hv = velocity_grid[x, y]
+
+            # somma contributi da ogni vicino (Hooke + viscous damper sui tassi relativi)
+            f_sum = 0.0
             neighbor_count = 0
-            
-            # Definisci i 6 vicini esagonali in base alla riga (pari o dispari)
-            if x % 2 == 0:  # Riga pari
-                neighbors = [
-                    (x-1, y),   # Sinistra
-                    (x+1, y),   # Destra
-                    (x, y-1),   # Basso
-                    (x, y+1),   # Alto
-                    (x-1, y+1), # Alto-sinistra
-                    (x+1, y+1)  # Alto-destra
-                ]
-            else:  # Riga dispari
-                neighbors = [
-                    (x-1, y),   # Sinistra
-                    (x+1, y),   # Destra
-                    (x, y-1),   # Basso
-                    (x, y+1),   # Alto
-                    (x-1, y-1), # Basso-sinistra
-                    (x+1, y-1)  # Basso-destra
-                ]
-            
-            # Somma i vicini validi
             for nx, ny in neighbors:
                 if 0 <= nx < plane_size and 0 <= ny < plane_size:
-                    neighbor_sum += height_grid[nx, ny]
+                    neighbor_z = height_grid[nx, ny]
+                    neighbor_v = velocity_grid[nx, ny]
+                    dz = neighbor_z - hz         # estensione della molla (positivo se vicino piu' alto)
+                    dv = neighbor_v - hv         # velocita' relativa
+                    f_sum += k * dz + c * dv
                     neighbor_count += 1
-            
-            # Calcola il laplaciano: media dei vicini meno il centro
+
+            # Per evitare che la somma delle forze cresca proporzionalmente al numero di vicini
+            # normalizziamo dividendo per il numero di vicini effettivi (comportamento stabilizzante)
             if neighbor_count > 0:
-                laplacian[x, y] = (neighbor_sum / neighbor_count) - height_grid[x, y]
-    
-    return laplacian
+                net_force[x, y] = f_sum / neighbor_count
+            else:
+                net_force[x, y] = 0.0
+
+    return net_force
+
 
 def update_plane():
     global plane_height, plane_velocity, plane_acceleration
+
     # Applica il peso se il mouse è premuto
     if mouse_weight_active:
         apply_force_at_cursor(glfw.get_current_context())
-    
-    # Usa il laplaciano esagonale invece del laplaciano a 4 vicini
-    laplacian = compute_hexagonal_laplacian(plane_height)
-    
-    # acceleration proportional to forces divided by mass
+
+    # Calcola le forze di molla e smorzamento tra vicini (senza usare il laplaciano)
+    net_force = compute_spring_forces(plane_height, plane_velocity)
+
+    # acceleration = net_force / mass (nessun altro termine esterno; solo interazione tra elementi)
     safe_mass = np.maximum(plane_mass, 1e-6)
-    
-    # Aumentato il coefficiente di elasticità per maggiore propagazione
-    effective_elasticity = elasticity * 1.5  # Moltiplicatore per aumentare la propagazione
-    
-    plane_acceleration = (effective_elasticity * laplacian - damping * plane_velocity) / safe_mass
+    plane_acceleration = net_force / safe_mass
+
+    # integrazione esplicita semi-implicita (velocita' aggiornata, poi posizione)
     plane_velocity += plane_acceleration * delta_time
+
+    # Clamp della velocita' per prevenire esplosioni numeriche
+    np.clip(plane_velocity, -max_velocity, max_velocity, out=plane_velocity)
+
     plane_height += plane_velocity * delta_time
+
+    # Fissare i bordi: ancoriamo i nodi del perimetro impostando velocita', accelerazione ed altezza a 0
+    plane_velocity[0, :] = 0.0
+    plane_velocity[-1, :] = 0.0
+    plane_velocity[:, 0] = 0.0
+    plane_velocity[:, -1] = 0.0
+
+    plane_acceleration[0, :] = 0.0
+    plane_acceleration[-1, :] = 0.0
+    plane_acceleration[:, 0] = 0.0
+    plane_acceleration[:, -1] = 0.0
+
+    plane_height[0, :] = 0.0
+    plane_height[-1, :] = 0.0
+    plane_height[:, 0] = 0.0
+    plane_height[:, -1] = 0.0
 
 def reset_simulation():
     global plane_height, plane_velocity, plane_acceleration
@@ -185,8 +221,8 @@ def apply_force_at_cursor(window, from_grid=False, grid_pos=None):
     # Apply force ONLY to the clicked cell (not neighbors)
     if 0 <= grid_x < plane_size and 0 <= grid_y < plane_size:
         m = max(1e-6, plane_mass[grid_x, grid_y])
-        # Aumentata l'intensità della forza applicata
-        plane_velocity[grid_x, grid_y] -= (force * 1.2) / m
+        # Scale the applied impulse by delta_time so repeated clicks/drags don't create huge velocities
+        plane_velocity[grid_x, grid_y] -= ((force * 1.2) / m) * delta_time
 
 def force_box_mouse_to_grid(mx, my):
     """Convert mouse coordinates (relative to window) to grid coordinates (ix, iy) in the force box.
@@ -308,7 +344,7 @@ def cleanup():
     glDisable(GL_DEPTH_TEST)
 
 def main():
-    global elasticity, damping, delta_time, force, window_size
+    global elasticity, damping, delta_time, force, window_size, max_velocity, base_mass
 
     if not glfw.init():
         return
@@ -348,10 +384,12 @@ def main():
         imgui.text("Propagation Settings:")
         _, elasticity = imgui.slider_float("k", elasticity, 0.1, 2.0)  # Aumentato range massimo a 2.0
         _, damping = imgui.slider_float("c", damping, 0.01, 1.0)
-        _, delta_time = imgui.slider_float("dt", delta_time, 0.01, 2.0)
+        _, delta_time = imgui.slider_float("dt", delta_time, 0.1, 2)  # Limita max a 0.1 per stabilità
         _, force = imgui.slider_float("F", force, 0.1, 15.0)  # Aumentato range massimo a 15.0
         global base_mass
         _, base_mass = imgui.slider_float("m", base_mass, 0.1, 10.0)
+        _, max_velocity = imgui.slider_float("v_max", max_velocity, 0.1, 20.0)  # Aumentato range massimo
+        # global_viscosity rimosso; usiamo solo il damping locale tra molle e il clamp della velocita'
         if imgui.button("Reset Simulation"):
             reset_simulation()
         imgui.end()
