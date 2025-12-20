@@ -31,6 +31,37 @@ plane_velocity = np.zeros((plane_size, plane_size))
 plane_acceleration = np.zeros((plane_size, plane_size))
 plane_mass = np.ones((plane_size, plane_size))
 
+# PID controller per stabilizzazione globale (toggleable)
+pid_enabled = False
+pid_kp = 2.0
+pid_ki = 0.5
+pid_kd = 0.1
+pid_integral = 0.0
+pid_prev_error = 0.0
+pid_output_min = 0.0
+pid_output_max = 1.0
+pid_target_speed = 0.02  # velocità media target (m/s)
+pid_last_output = 0.0
+
+def pid_step(avg_speed, dt):
+    """Semplice PID che prende l'errore sulla velocità media del sistema
+    e restituisce un fattore di smorzamento aggiuntivo [0,1]."""
+    global pid_integral, pid_prev_error, pid_last_output
+    error = avg_speed - pid_target_speed
+    pid_integral += error * dt
+    derivative = (error - pid_prev_error) / dt if dt > 0 else 0.0
+    out = pid_kp * error + pid_ki * pid_integral + pid_kd * derivative
+    pid_prev_error = error
+    # clamp output
+    pid_last_output = max(pid_output_min, min(pid_output_max, out))
+    return pid_last_output
+
+# Inizializza l'altezza usando la quota di riposo
+plane_height = np.full((plane_size, plane_size), plane_rest_height)
+plane_velocity = np.zeros((plane_size, plane_size))
+plane_acceleration = np.zeros((plane_size, plane_size))
+plane_mass = np.ones((plane_size, plane_size))
+
 # Controlli della telecamera
 class Camera:
     def __init__(self, angle_x=-60, angle_y=20, zoom=-25):
@@ -169,6 +200,14 @@ def update_plane():
     np.clip(plane_velocity, -max_velocity, max_velocity, out=plane_velocity)
 
     plane_height += plane_velocity * delta_time
+
+    # PID: stabilizzazione globale (riduce la velocità media se attivo)
+    if pid_enabled:
+        avg_speed = float(np.mean(np.abs(plane_velocity)))
+        extra_damp = pid_step(avg_speed, delta_time)
+        if extra_damp > 0.0:
+            # applichiamo lo smorzamento come fattore moltiplicativo alle velocità
+            plane_velocity *= max(0.0, 1.0 - extra_damp)
 
     # PREVENZIONE SEMPLICE DELLA PENETRAZIONE DELLA BASE:
     # Se un nodo scende sotto z=0 lo riportiamo a 0 e applichiamo una piccola restituzione
@@ -393,7 +432,7 @@ def cleanup():
     glDisable(GL_DEPTH_TEST)
 
 def main():
-    global elasticity, damping, delta_time, force, window_size, max_velocity, base_mass
+    global elasticity, damping, delta_time, force, window_size, max_velocity, base_mass, pid_enabled, pid_kp, pid_ki, pid_kd, pid_target_speed, pid_integral, pid_prev_error, pid_last_output
 
     if not glfw.init():
         return
@@ -427,18 +466,36 @@ def main():
 
         # Finestra ImGui per i parametri
         imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(280, 200)  # Aumentata altezza per aggiungere informazioni
+        imgui.set_next_window_size(320, 260)  # aumentata per i controlli PID
         flags = imgui.WINDOW_NO_COLLAPSE
         imgui.begin("Parameters", True, flags)
         imgui.text("Propagation Settings:")
-        _, elasticity = imgui.slider_float("k", elasticity, 0.1, 2.0)  # Aumentato range massimo a 2.0
+        _, elasticity = imgui.slider_float("k", elasticity, 0.1, 2.0)
         _, damping = imgui.slider_float("c", damping, 0.01, 1.0)
-        _, delta_time = imgui.slider_float("dt", delta_time, 0.1, 2)  # Limita max a 0.1 per stabilità
-        _, force = imgui.slider_float("F", force, 0.1, 15.0)  # Aumentato range massimo a 15.0
+        _, delta_time = imgui.slider_float("dt", delta_time, 0.001, 0.5)
+        _, force = imgui.slider_float("F", force, 0.1, 15.0)
         global base_mass
         _, base_mass = imgui.slider_float("m", base_mass, 0.1, 10.0)
-        _, max_velocity = imgui.slider_float("v_max", max_velocity, 0.1, 20.0)  # Aumentato range massimo
-        # global_viscosity rimosso; usiamo solo il damping locale tra molle e il clamp della velocita'
+        _, max_velocity = imgui.slider_float("v_max", max_velocity, 0.1, 50.0)
+
+        imgui.separator()
+        imgui.text("PID Stabilization (global):")
+        clicked, pid_enabled = imgui.checkbox("Enable PID", pid_enabled)
+        imgui.same_line()
+        if imgui.button("Reset PID"):
+            pid_integral = 0.0
+            pid_prev_error = 0.0
+            pid_last_output = 0.0
+
+        # PID gains and target
+        _, pid_kp = imgui.slider_float("PID Kp", pid_kp, 0.0, 10.0)
+        _, pid_ki = imgui.slider_float("PID Ki", pid_ki, 0.0, 5.0)
+        _, pid_kd = imgui.slider_float("PID Kd", pid_kd, 0.0, 5.0)
+        _, pid_target_speed = imgui.slider_float("PID target speed", pid_target_speed, 0.0, 0.5)
+
+        # Visualizza output PID corrente
+        imgui.text("PID output: {:.4f}".format(pid_last_output))
+
         if imgui.button("Reset Simulation"):
             reset_simulation()
         imgui.end()
