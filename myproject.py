@@ -9,19 +9,27 @@ import colorsys
 # Parametri del piano e dell'onda
 plane_size = 50
 window_size = (800, 600)
-plane_height = np.zeros((plane_size, plane_size))
-plane_velocity = np.zeros((plane_size, plane_size))
-plane_acceleration = np.zeros((plane_size, plane_size))
-plane_mass = np.ones((plane_size, plane_size))
-
 # Parametri di simulazione
 elasticity = 1.0  # Aumentato da 0.3 a 0.5 per maggiore propagazione
 damping = 0.3     # Leggermente ridotto per meno smorzamento
-delta_time = 1.0
-force = 4.0       # Forza applicata al clic del mouse (aumentata da 3.0)
+# timestep di default: ~60Hz - ridotto rispetto al valore precedente per stabilità della simulazione
+delta_time = 0.3
+force = 10.0       # Forza applicata al clic del mouse (aumentata da 3.0)
 base_mass = 1.0
+# Altezza di riposo della griglia rispetto alla base (1 cm)
+plane_rest_height = 1.0  # 1 cm sopra la base (unità del mondo)
+
+# Piccolo termine di gravità (scalato): mantiene la pelle a contatto con la base
+# gravity = -9.81 * 0.001
+
 # Limite sulla velocità per evitare esplosioni numeriche
 max_velocity = 5.0
+
+# Inizializza l'altezza usando la quota di riposo
+plane_height = np.full((plane_size, plane_size), plane_rest_height)
+plane_velocity = np.zeros((plane_size, plane_size))
+plane_acceleration = np.zeros((plane_size, plane_size))
+plane_mass = np.ones((plane_size, plane_size))
 
 # Controlli della telecamera
 class Camera:
@@ -79,7 +87,10 @@ def get_hex_offset(x):
     return (x % 2) * 0.5
 
 def compute_spring_forces(height_grid, velocity_grid):
-    """Calcola la forza netta (molla + smorzatore) su ogni cella dovuta ai 6 vicini esagonali.
+    """Calcola la forza netta su ogni cella:
+    - somma dei contributi Hooke + viscous damper verso ognuno dei 6 vicini (non media)
+    - aggiunge la molla+damper verso la base (posizione di riposo = plane_rest_height)
+    - aggiunge un piccolo termine di gravità
     Restituisce un array con la somma delle forze per cella (positivo = spinge verso su)."""
     net_force = np.zeros((plane_size, plane_size))
 
@@ -114,22 +125,25 @@ def compute_spring_forces(height_grid, velocity_grid):
 
             # somma contributi da ogni vicino (Hooke + viscous damper sui tassi relativi)
             f_sum = 0.0
-            neighbor_count = 0
             for nx, ny in neighbors:
                 if 0 <= nx < plane_size and 0 <= ny < plane_size:
                     neighbor_z = height_grid[nx, ny]
                     neighbor_v = velocity_grid[nx, ny]
                     dz = neighbor_z - hz         # estensione della molla (positivo se vicino piu' alto)
                     dv = neighbor_v - hv         # velocita' relativa
+                    # forza diretta dalla molla verso il vicino
                     f_sum += k * dz + c * dv
-                    neighbor_count += 1
 
-            # Per evitare che la somma delle forze cresca proporzionalmente al numero di vicini
-            # normalizziamo dividendo per il numero di vicini effettivi (comportamento stabilizzante)
-            if neighbor_count > 0:
-                net_force[x, y] = f_sum / neighbor_count
-            else:
-                net_force[x, y] = 0.0
+            # Connessione alla base fissa: usiamo plane_rest_height come posizione di riposo
+            # La forza della molla verso la base annulla quando hz == plane_rest_height
+            base_force = k * (plane_rest_height - hz) + c * (0.0 - hv)
+
+            # Piccolo termine di gravità (sommato come forza netta)
+            # gravity_force = gravity * max(1.0, plane_mass[x, y])
+
+            # Somma delle forze (positive = spinge verso su)
+            # net_force[x, y] = f_sum + base_force + gravity_force
+            net_force[x, y] = f_sum + base_force
 
     return net_force
 
@@ -156,25 +170,28 @@ def update_plane():
 
     plane_height += plane_velocity * delta_time
 
-    # Fissare i bordi: ancoriamo i nodi del perimetro impostando velocita', accelerazione ed altezza a 0
-    plane_velocity[0, :] = 0.0
-    plane_velocity[-1, :] = 0.0
-    plane_velocity[:, 0] = 0.0
-    plane_velocity[:, -1] = 0.0
+    # PREVENZIONE SEMPLICE DELLA PENETRAZIONE DELLA BASE:
+    # Se un nodo scende sotto z=0 lo riportiamo a 0 e applichiamo una piccola restituzione
+    below = plane_height < 0.0
+    if np.any(below):
+        restitution = 0.15
+        plane_height[below] = 0.0
+        plane_velocity[below] = -plane_velocity[below] * restitution
 
-    plane_acceleration[0, :] = 0.0
-    plane_acceleration[-1, :] = 0.0
-    plane_acceleration[:, 0] = 0.0
-    plane_acceleration[:, -1] = 0.0
+    # BORDI LIBERI: non ancoriamo i nodi del perimetro; permettiamo alla pelle di muoversi liberamente ai bordi.
+    # Per ridurre artefatti numerici applichiamo un leggero smorzamento alle velocità di bordo invece di fissarle.
+    edge_damping = 0.995
+    plane_velocity[0, :] *= edge_damping
+    plane_velocity[-1, :] *= edge_damping
+    plane_velocity[:, 0] *= edge_damping
+    plane_velocity[:, -1] *= edge_damping
 
-    plane_height[0, :] = 0.0
-    plane_height[-1, :] = 0.0
-    plane_height[:, 0] = 0.0
-    plane_height[:, -1] = 0.0
+    # Manteniamo l'accelerazione coerente (può rimanere calcolata normalmente)
+    # ...existing code...
 
 def reset_simulation():
     global plane_height, plane_velocity, plane_acceleration
-    plane_height.fill(0)
+    plane_height.fill(plane_rest_height)
     plane_velocity.fill(0)
     plane_acceleration.fill(0)
 
@@ -337,6 +354,39 @@ def draw_empty_hexagons():
                 glVertex3f(x2, y2, z2)
     glEnd()
 
+# Aggiunta: disegna la base a z=0 (piano semi-trasparente + griglia)
+def draw_base():
+    """Disegna un piano di base a z=0 coprendo l'area della griglia."""
+    # Disattiva temporaneamente l'illuminazione per colore piatto e usa blending per trasparenza
+    glDisable(GL_LIGHTING)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    # Piano riempito leggermente scuro e trasparente
+    glColor4f(0.18, 0.18, 0.18, 0.6)
+    glBegin(GL_QUADS)
+    glVertex3f(0.0, 0.0, 0.0)
+    glVertex3f(float(plane_size), 0.0, 0.0)
+    glVertex3f(float(plane_size), float(plane_size), 0.0)
+    glVertex3f(0.0, float(plane_size), 0.0)
+    glEnd()
+
+    # Linee della griglia sopra il piano
+    glColor4f(0.0, 0.0, 0.0, 0.35)
+    glBegin(GL_LINES)
+    for i in range(plane_size + 1):
+        # linee parallele asse Y
+        glVertex3f(float(i), 0.0, 0.0)
+        glVertex3f(float(i), float(plane_size), 0.0)
+        # linee parallele asse X
+        glVertex3f(0.0, float(i), 0.0)
+        glVertex3f(float(plane_size), float(i), 0.0)
+    glEnd()
+
+    # restore blending / lighting
+    glDisable(GL_BLEND)
+    glEnable(GL_LIGHTING)
+
 def cleanup():
     glDisable(GL_LIGHTING)
     glDisable(GL_COLOR_MATERIAL)
@@ -411,6 +461,7 @@ def main():
         glTranslatef(8, 0, 0)
 
         setup_lighting_and_color()
+        draw_base()
         draw_plane()
         draw_empty_hexagons()
 
